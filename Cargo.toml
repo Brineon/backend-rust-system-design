@@ -1,0 +1,13 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"  # <--- THIS WAS MISSING
+redis = { version = "0.24", features = ["tokio-comp"] }
+uuid = { version = "1.4", features = ["v4", "fast-rng"] }
+futures-util = "0.3"
