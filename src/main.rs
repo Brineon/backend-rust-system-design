@@ -13,6 +13,10 @@ use std::{
 };
 use tokio::sync::broadcast;
 use uuid::Uuid;
+// Kafka imports
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+
 
 #[derive(Clone)]
 struct AppState {
@@ -88,7 +92,8 @@ async fn main() {
         .route("/signup", post(signup))
         .route("/login", post(login))
         .route("/createjob", post(create_job))
-        .route("/job/:id", get(get_job_status)) 
+        .route("/job/:id", get(get_job_status))
+        .route("/listjobs", get(list_jobs))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -180,6 +185,23 @@ async fn get_job_status(
         })
     }
 }
+//List Jobs 
+async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatusResponse>> {
+    let jobs = state.jobs.lock().unwrap();
+
+    let result = jobs
+        .values()
+        .map(|job| JobStatusResponse {
+            id: job.id.clone(),
+            status: job.status.clone(),
+        })
+        .collect();
+
+    Json(result)
+}
+
+
+
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -199,29 +221,33 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
+//Start_worker
 async fn start_worker(state: AppState) {
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    
     
     let client = match redis::Client::open("redis://redis:6379") {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("Worker failed to connect to Redis: {}", e);
-            return;
-        }
+        Err(e) => { eprintln!("Redis error: {}", e); return; }
     };
 
     let con = match client.get_async_connection().await {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("Worker failed to get Redis connection: {}", e);
-            return;
-        }
+        Err(e) => { eprintln!("Redis connection error: {}", e); return; }
     };
 
     let mut pubsub = con.into_pubsub();
     pubsub.subscribe("jobs").await.unwrap();
 
-    println!("Worker listening for jobs....");
+    // 2. Connect to Kafka
+    let kafka_producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", "kafka:9092")
+        .set("message.timeout.ms", "5000")
+        .create()
+        .expect("Failed to create Kafka Producer");
+
+    println!("Worker listening for jobs (with Kafka failure enabled)....");
 
     while let Some(msg) = pubsub.on_message().next().await {
         let job_id: String = match msg.get_payload() {
@@ -230,29 +256,61 @@ async fn start_worker(state: AppState) {
         };
 
         let state_clone = state.clone();
+        
+        let producer_clone = kafka_producer.clone();
 
         tokio::spawn(async move {
             println!("Processing job: {}", job_id);
+            
+        
             {
                 let mut jobs = state_clone.jobs.lock().unwrap();
                 if let Some(job) = jobs.get_mut(&job_id) {
                     job.status = "processing".to_string();
-                    let _ = state_clone.tx.send(format!("Job {} is processing", job_id));
+                    let _ = state_clone.tx.send(format!("Job {} processing", job_id));
                 }
             }
 
             // Simulate work
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            {
-                let mut jobs = state_clone.jobs.lock().unwrap();
-                if let Some(job) = jobs.get_mut(&job_id) {
-                    job.status = "done".to_string();
-                    let _ = state_clone.tx.send(format!("Job {} is done", job_id));
+            // 3. FAILURE SIMULATION logic
+            let first_char = job_id.chars().next().unwrap_or('a');
+            
+            let is_failure = first_char.is_numeric() && (first_char as u8) % 2 == 0;
+
+            if is_failure {
+                println!("Job {} FAILED! Sending to Kafka...", job_id);
+                
+                
+                {
+                    let mut jobs = state_clone.jobs.lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&job_id) {
+                        job.status = "failed".to_string();
+                        let _ = state_clone.tx.send(format!("Job {} FAILED", job_id));
+                    }
+                }
+
+            
+                let _ = producer_clone.send(
+                    FutureRecord::to("failed_jobs")
+                        .payload(&job_id)
+                        .key("failure_event"),
+                    std::time::Duration::from_secs(0),
+                ).await;
+
+            } else {
+                
+                println!("Job {} SUCCESS", job_id);
+                
+                {
+                    let mut jobs = state_clone.jobs.lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&job_id) {
+                        job.status = "done".to_string();
+                        let _ = state_clone.tx.send(format!("Job {} DONE", job_id));
+                    }
                 }
             }
-
-            println!("Job {} completed", job_id);
         });
     }
 }
