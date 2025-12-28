@@ -1,3 +1,19 @@
+## 📺 Live Demo (No Setup Required)
+
+You can run this full architecture (Rust + Redis + Kafka) in your browser without installing Docker.
+
+1. Click the green **Code** button on this repo.
+2. Select the **Codespaces** tab.
+3. Click **Create codespace on main**.
+4. Wait for the terminal to load, then run:
+   ```bash
+   docker compose up --build
+
+
+
+
+
+
 # RustyScale: High-Performance Async Job System
 
 A production-grade distributed backend built with **Rust**, **Redis**, **Kafka**, and **Nginx**. Designed to demonstrate high concurrency, fault tolerance, and rate limiting.
